@@ -1,0 +1,235 @@
+---
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Load used packages
+library(package = "tidyverse")
+
+# Configure knitting
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+
+
+
+```{r get-data}
+# Set a snapshot file
+vico_snapshot <- "data/vico_snapshot.RData"
+
+# Define used variables
+vico_variables <- c(
+  # general case data
+  "SubjectID",
+  "SiteDepartamento", "epiYearAdmision", "SiteType", "SiteName", "HUSarea",
+  "salaIngreso",
+  "fechaHoraAdmision",
+  "sexo", "edadAnios", "fechaDeNacimiento",
+  
+  # case definition
+  "elegibleDiarrea", # compare with actual case definition
+  "diarreaComenzoHaceDias", "diarreaMaximoAsientos1Dia",
+  "diarreaOtroEpisodioSemanaAnterior",
+  "pacienteInscritoViCo", "SASubjectID",
+  
+  # lab info
+  "muestraHecesColecta", "pruebaCultivoHizo", "ETEC", "EPEC",
+  
+  # DEC virulence
+  "sxt1", "stx2", "eaeA", "ST1a", "ST1b", "LT",
+  
+  # outcomes
+  "egresoTipo", "egresoMuerteFecha", "moribundoViCo", "moribundoViCoFecha",
+  # TODO missing ICU data
+  "cuidadoIntensivoDias",
+  "gradoDeshidratacion", "gradoDeshidratacionRegistrado",
+  "centroRehidratacionTipo",
+  "hxD_ConSangre", "hxD_ConMoco", "hxC_Vomitos",
+  
+  # other etiology data
+  "rotavirus", "RTqPCR_NV1", "RTqPCR_NV2", "SAPOVIRUS", "ASTROVIRUS",
+  
+  # clinical
+  "tomadoSuerosSalesUltimas72hora",
+  "medUltimas72HorasAntiB",
+  "ingresoPlanBPlanC",
+  
+  # ses
+  "familiaIngresosMensuales", "casaCuantasPersonasViven", "casaCuantosDormitorios",
+  "casaMaterialPiso", "casaEnergiaElectrica", "patienteGradoEscolarCompleto",
+  "parentescoGradoEscolarCompleto",
+  
+  # water sources
+  "fuentesAguaChorroDentroCasaRedPublica", "fuentesAguaChorroPublico",
+  "fuentesAguaChorroPatioCompartidoOtraFuente", "fuentesAguaLavaderosPublicos",
+  "fuentesAguaPozoPropio", "fuentesAguaPozoPublico",
+  "fuentesAguaCompranAguaEmbotellada", "fuentesAguaDeCamionCisterna",
+  "fuentesAguaLluvia", "fuentesAguaRioLago",
+  
+  # other sanitation
+  "TxAgua", "TipoSanitario", "inodoroComparte", "inodoroLimpia", "inodoroLimpia_frec",
+  "desechoHeces",
+  
+  # risks
+  "contactoAnimalesCasa"
+)
+
+# Check if a snapshot is available
+if(!file.exists(vico_snapshot)){
+  # if the snapshot is not available, read from server
+  # Use the DBI package
+  
+  #TODO add loading data from server
+  # data_base <- DBI::dbConnect()
+  
+  # Depto Santa Rosa
+  # epiYearAdmission %in% c(2008, 2009, 2014, 2015)
+} else {
+  # if the snapshot is available, load it
+  load(file = vico_snapshot)
+}
+```
+
+
+
+```{r select-variables-subsets}
+enterics <- Diarr %>%
+  as_tibble() %>%
+  # only keep relevant subsets
+  filter(
+    # Screened in Santa Rosa
+    SiteDepartamento == "SR",
+    # During the period with DEC testing
+    epiYearAdmision %in% c(2008, 2009, 2014, 2015)
+  ) %>%
+  select(one_of(vico_variables)) %>%
+  # Classify
+  mutate(
+    # Define pathotype
+    STEC_ONE = ifelse(sxt1 == 1 | stx2 == 1, 1, 0),
+    EPEC_ONE = ifelse(eaeA == 1, 1, 0),
+    ETEC_ONE = ifelse(ST1a == 1 | ST1b == 1 | LT == 1, 1, 0),
+    STEC_Solo = ifelse(STEC_ONE == 1 & !(EPEC_ONE == 1 | ETEC_ONE == 1), 1, 0),
+    EPEC_Solo = ifelse(EPEC_ONE == 1 & !(STEC_ONE == 1 | ETEC_ONE == 1), 1, 0),
+    ETEC_Solo = ifelse(ETEC_ONE == 1 & !(STEC_ONE == 1 | EPEC_ONE == 1), 1, 0),
+    other_dec = (STEC_ONE == 1 | EPEC_ONE == 1 | ETEC_ONE == 1) &
+      (STEC_Solo != 1 & ETEC_Solo != 1 & EPEC_Solo != 1),
+    # categories
+    site_type = ifelse(
+      test = SiteType == "H",
+      yes = "hospital",
+      no = "clinic"
+    ),
+    period = case_when(
+      epiYearAdmision %in% c(2008, 2009) ~ "2008-2009",
+      epiYearAdmision %in% c(2014, 2015) ~ "2014-2015"
+    ),
+    # Cuantify screening
+    screened = 1,
+    # TODO define eligibility
+    eligible = elegibleDiarrea == 1 & !is.na(elegibleDiarrea),
+    #   (
+    #   (diarreaComenzoHaceDias <= 14 & !is.na(diarreaComenzoHaceDias)) &
+    #   (diarreaMaximoAsientos1Dia >= 3 & !is.na(diarreaMaximoAsientos1Dia)) &
+    #   (diarreaOtroEpisodioSemanaAnterior != 1 & !is.na(diarreaOtroEpisodioSemanaAnterior)) &
+    #     # (salaIngreso != 6) &
+    #     (actualAdmitido == 1)
+    # ),
+    enrolled = eligible & !is.na(SASubjectID),
+    sampled = muestraHecesColecta == 1,
+    cultured = pruebaCultivoHizo == 1,
+    assumed_ecoli = !is.na(ETEC) | !is.na(EPEC),
+    dec_tested = !is.na(sxt1) | !is.na(stx2) | !is.na(eaeA) | !is.na(ST1a) |
+      !is.na(ST1b) | !is.na(LT),
+    # 
+    dec_positive = (!is.na(STEC_Solo) & STEC_Solo == 1) |
+      (!is.na(EPEC_Solo) & EPEC_Solo == 1) |
+      (!is.na(ETEC_Solo) & ETEC_Solo == 1) |
+      (!is.na(other_dec) & other_dec == 1)
+  )
+
+
+# sites per period
+enterics %>%
+  group_by(period, site_type, SiteName) %>%
+  summarize() %>%
+  summarize(n = n()) %>%
+  spread(period, n)
+
+
+# Enrollment table
+enterics %>%
+  select(
+    site_type, screened, eligible, enrolled, sampled, cultured,
+    assumed_ecoli, dec_tested, dec_positive
+  ) %>%
+  group_by(site_type) %>%
+  summarize_at(
+    vars(-one_of(c("site_type"))),
+    funs(sum(., na.rm = TRUE))
+  ) %>%
+  gather(
+    step, value, -site_type, factor_key = TRUE
+  ) %>%
+  spread(site_type, value) %>%
+  # add percentage
+  mutate_at(
+    vars(clinic, hospital),
+    funs(percent = round(. / lag(.) * 100, 1))
+  )
+
+
+# dec tested by year
+enterics %>%
+  group_by(epiYearAdmision, site_type) %>%
+  summarize(
+    dec_tested = sum(dec_tested, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  spread(site_type, dec_tested) %>%
+  mutate_at(
+    vars(clinic, hospital),
+    funs(percent = round(. / sum(.) * 100, 1))
+  )
+
+# dec positive by year
+enterics %>%
+  group_by(site_type, epiYearAdmision) %>%
+  summarize(
+    n = sum(dec_tested),
+    dec_positive = sum(dec_positive, na.rm = TRUE),
+    percent = round(dec_positive / n * 100, 1)
+  )
+
+```
+
+
+
+```{r flow-diagram}
+DiagrammeR::DiagrammeR("
+  graph LR
+    A-->B
+    A-->C
+    C-->E
+    B-->D
+    C-->D
+    D-->F
+    E-->F
+")
+```
+
+
+
+```{r classify-patients}
+
+enterics 
+
+
+```
+
+
+
+
+
+
+
